@@ -111,6 +111,8 @@ SSH Security Installer
   KEY_SH_ALLOW_UNMANAGED_FW=1  在无 ufw/firewalld 且检测到限制性 iptables/nft 时仍允许改端口（CLI）
   KEY_SH_FIREWALLD_ZONE=区域   多个 firewalld 活动区域且无法识别入站接口时，明确指定区域
   KEY_SH_CONFIRMED_PASSWORD_LOGIN=1  使用 -o 替换现有有效公钥前，确认已测试密码备用连接
+  KEY_SH_EXPECTED_FINGERPRINTS="SHA256:..."  CLI 导入远程公钥时必须提供的预期指纹（多个用空格或逗号分隔）
+  KEY_SH_F2B_TRUST_CURRENT_IP=1  明确要求把当前 SSH 客户端 IP 加入 Fail2Ban 永久白名单
 
 其他:
   -h, --help     显示帮助
@@ -334,8 +336,9 @@ sshd_has_unverifiable_match() {
     return 1
 }
 
-# /run 由 root 管理，锁目录同时存放完整快照；失败快照不会作为有效事务发布。
-SSHD_LOCK_DIR="/run/key-sh-sshd.lock"
+# 持久目录同时存放事务锁与完整快照，掉电或重启后仍可人工恢复。
+SSHD_STATE_DIR="/var/lib/key-sh"
+SSHD_LOCK_DIR="${SSHD_STATE_DIR}/sshd-transaction"
 
 remove_sshd_snapshot() {
     local dir="$1"
@@ -350,6 +353,16 @@ begin_sshd_transaction() {
     local dir='' name path backup ok=1
     if [ -n "$SSHD_TXN_DIR" ]; then
         $SUDO test -f "$SSHD_TXN_DIR/complete"; return
+    fi
+    if $SUDO test -L "$SSHD_STATE_DIR" ||
+       { $SUDO test -e "$SSHD_STATE_DIR" && ! $SUDO test -d "$SSHD_STATE_DIR"; }; then
+        printf '%b SSH 事务状态路径不安全：%s\n' "$ERROR" "$SSHD_STATE_DIR" >&2
+        return 1
+    fi
+    if ! $SUDO install -d -o root -g root -m 700 -- "$SSHD_STATE_DIR" ||
+       [ "$($SUDO stat -c '%u:%a' -- "$SSHD_STATE_DIR" 2>/dev/null)" != '0:700' ]; then
+        printf '%b 无法创建安全的 SSH 事务状态目录：%s\n' "$ERROR" "$SSHD_STATE_DIR" >&2
+        return 1
     fi
     if ! $SUDO mkdir -m 700 -- "$SSHD_LOCK_DIR" 2>/dev/null; then
         printf '%b SSH 配置锁已存在；请先确认其他实例或待恢复事务的状态：%s\n' "$ERROR" "$SSHD_LOCK_DIR" >&2
@@ -740,7 +753,7 @@ check_dependencies() {
         echo -e "${WARN} 正在安装依赖: ${pkgs[*]}"
         pkg_install "${pkgs[@]}" || return 1
     fi
-    for dep in curl ssh-keygen awk flock install mktemp; do
+    for dep in curl ssh-keygen awk flock install mktemp stat; do
         command -v "$dep" >/dev/null 2>&1 || { printf '%b 缺少必要命令: %s\n' "$ERROR" "$dep" >&2; return 1; }
     done
     return 0
@@ -770,7 +783,8 @@ target_key_worker() {
         for name in TARGET_USER TARGET_UID TARGET_HOME SSH_DIR AUTHORIZED_KEYS INFO WARN ERROR GREEN RESET; do
             printf '%s=%q\n' "$name" "${!name}"
         done
-        declare -f run_as_target target_key_worker safe_key_paths init_ssh_dir read_authorized_keys \
+        declare -f run_as_target target_key_worker safe_key_paths secure_key_path verify_home_path_security \
+            verify_key_path_security init_ssh_dir read_authorized_keys \
             validate_public_key_content key_fingerprint _mv_supports_T commit_authorized_keys append_key_with_meta \
             append_keys_with_meta_batch \
             remove_authorized_key count_authorized_keys generated_key_files
@@ -791,16 +805,51 @@ safe_key_paths() {
     fi
 }
 
+# OpenSSH StrictModes 要求 home/.ssh/authorized_keys 只能由目标用户或 root 所有，
+# 且不能被组或其他用户写入。只修正脚本创建的密钥文件权限，不静默修改 home。
+secure_key_path() {
+    local path="$1" kind="$2" label="$3" uid mode
+    [ ! -L "$path" ] || { printf '%b %s 不能是符号链接：%s\n' "$ERROR" "$label" "$path" >&2; return 1; }
+    case "$kind" in
+        dir) [ -d "$path" ] ;;
+        file) [ -f "$path" ] ;;
+        *) return 1 ;;
+    esac || { printf '%b %s 类型不正确：%s\n' "$ERROR" "$label" "$path" >&2; return 1; }
+    uid="$(stat -c '%u' -- "$path" 2>/dev/null)" || return 1
+    mode="$(stat -c '%a' -- "$path" 2>/dev/null)" || return 1
+    [[ "$uid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+    if [ "$uid" -ne "$TARGET_UID" ] && [ "$uid" -ne 0 ]; then
+        printf '%b %s 必须由目标用户或 root 所有：%s\n' "$ERROR" "$label" "$path" >&2
+        return 1
+    fi
+    if (( (8#$mode & 8#22) != 0 )); then
+        printf '%b %s 不能允许组或其他用户写入：%s (mode %s)\n' "$ERROR" "$label" "$path" "$mode" >&2
+        return 1
+    fi
+}
+
+verify_home_path_security() {
+    secure_key_path "$TARGET_HOME" dir '目标用户家目录'
+}
+
+verify_key_path_security() {
+    safe_key_paths || return 1
+    verify_home_path_security || return 1
+    secure_key_path "$SSH_DIR" dir '.ssh 目录' || return 1
+    secure_key_path "$AUTHORIZED_KEYS" file 'authorized_keys' || return 1
+}
+
 init_ssh_dir() {
     if [ "$EUID" -ne "$TARGET_UID" ]; then target_key_worker init_ssh_dir; return; fi
     safe_key_paths || return 1
+    verify_home_path_security || return 1
     ( umask 077; mkdir -p -- "$SSH_DIR" ) || return 1
     chmod 700 -- "$SSH_DIR" || return 1
     if [ ! -e "$AUTHORIZED_KEYS" ]; then
         ( umask 077; set -o noclobber; : > "$AUTHORIZED_KEYS" ) || return 1
     fi
     chmod 600 -- "$AUTHORIZED_KEYS" || return 1
-    return 0
+    verify_key_path_security
 }
 
 read_authorized_keys() {
@@ -839,6 +888,49 @@ validate_public_key_content() (
 
 key_fingerprint() {
     ssh-keygen -l -f "$1" 2>/dev/null | awk 'NR==1 {print $2}'
+}
+
+public_key_fingerprints() (
+    local content="$1" file
+    file="$(mktemp)" || return 1
+    trap 'rm -f -- "$file"' EXIT
+    printf '%s\n' "$content" > "$file" || return 1
+    ssh-keygen -l -f "$file" 2>/dev/null | awk '$2 ~ /^SHA256:/ {print $2}' | LC_ALL=C sort -u
+)
+
+normalize_expected_fingerprints() {
+    local raw="${1//,/ }" fp normalized=''
+    local -a values=()
+    read -r -a values <<< "$raw"
+    [ "${#values[@]}" -gt 0 ] || return 1
+    for fp in "${values[@]}"; do
+        [[ "$fp" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || {
+            printf '%b 指纹格式无效：%s\n' "$ERROR" "$fp" >&2; return 1;
+        }
+        normalized+="${fp}"$'\n'
+    done
+    printf '%s' "$normalized" | LC_ALL=C sort -u
+}
+
+verify_public_key_fingerprints() {
+    local content="$1" expected="$2" actual normalized
+    actual="$(public_key_fingerprints "$content")" || return 1
+    [ -n "$actual" ] || { printf '%b 无法提取公钥 SHA256 指纹。\n' "$ERROR" >&2; return 1; }
+    normalized="$(normalize_expected_fingerprints "$expected")" || return 1
+    if [ "$actual" != "$normalized" ]; then
+        printf '%b 远程公钥指纹与预期不一致，已拒绝导入。\n' "$ERROR" >&2
+        printf '实际指纹：\n%s\n预期指纹：\n%s\n' "$actual" "$normalized" >&2
+        return 1
+    fi
+}
+
+confirm_remote_key_fingerprints() {
+    local content="$1" label="$2" actual expected
+    actual="$(public_key_fingerprints "$content")" || return 1
+    [ -n "$actual" ] || return 1
+    printf '%b %s 返回的公钥指纹：\n%s\n' "$INFO" "$label" "$actual"
+    read -rp '请输入通过可信渠道获得的预期 SHA256 指纹（多个用空格分隔，留空取消）: ' expected || return 1
+    [ -n "$expected" ] && verify_public_key_fingerprints "$content" "$expected"
 }
 
 # 调用方持有 .key-sh.lock；stage 与目标在同一目录，install 失败绝不提交。
@@ -1106,7 +1198,8 @@ sync_f2b_port_after_ssh_change() {
     if ! $SUDO test -f "$JAIL_CONF" ||
        ! $SUDO grep -qE "^[[:space:]]*\\[${TARGET_JAIL}\\][[:space:]]*$" "$JAIL_CONF"; then
         if f2b_jail_is_active; then
-            printf '%b sshd jail 来自其他配置文件；未自动改写，请确认其端口包含 %s。\n' "$WARN" "$new_port" >&2
+            printf '%b sshd jail 来自其他配置文件，无法保证其端口同步为 %s。\n' "$ERROR" "$new_port" >&2
+            return 1
         fi
         return 0
     fi
@@ -1129,6 +1222,18 @@ sync_f2b_port_after_ssh_change() {
         printf '%b Fail2Ban 当前未运行；已校验并保存新端口 %s，将在下次启动时使用。\n' "$WARN" "$new_port" >&2
         return 0
     )
+}
+
+# Fail2Ban 已安装时，只允许脚本修改自己能够原子备份和验证的 [sshd] 配置。
+# 端口变更前先检查，避免 SSH 已换端口后才发现 jail 无法同步。
+f2b_port_sync_preflight() {
+    command -v fail2ban-client >/dev/null 2>&1 || return 0
+    if ! $SUDO test -f "$JAIL_CONF" || $SUDO test -L "$JAIL_CONF" ||
+       ! $SUDO grep -qE "^[[:space:]]*\\[${TARGET_JAIL}\\][[:space:]]*$" "$JAIL_CONF"; then
+        printf '%b 已安装 Fail2Ban，但脚本无法安全管理 %s 中的 [sshd] jail。\n' "$ERROR" "$JAIL_CONF" >&2
+        printf '%b 请先把 sshd jail 迁入该文件并确认没有后续覆盖，再修改 SSH 端口。\n' "$ERROR" >&2
+        return 1
+    fi
 }
 
 get_fail2ban_status() {
@@ -1195,8 +1300,13 @@ generate_default_jail_conf() {
         banaction="nftables-multiport"
     fi
     ignoreip="127.0.0.1/8 ::1"
-    client_ip="$(f2b_session_client_ip || true)"
-    [ -n "$client_ip" ] && ignoreip="${ignoreip} ${client_ip}"
+    if [ "${KEY_SH_F2B_TRUST_CURRENT_IP:-0}" = 1 ]; then
+        client_ip="$(f2b_session_client_ip || true)"
+        if [ -n "$client_ip" ]; then
+            ignoreip="${ignoreip} ${client_ip}"
+            printf '%b 已按明确设置把当前 SSH 客户端 IP 永久加入 Fail2Ban 白名单：%s\n' "$WARN" "$client_ip" >&2
+        fi
+    fi
     cat <<EOF2
 [${TARGET_JAIL}]
 enabled = true
@@ -1580,6 +1690,11 @@ generate_vps_keypair() {
     if ! run_as_target ssh-keygen -t ed25519 -C '' -f "$dir/PrivateKey"; then
         printf '%b 生成失败。可能的暂存文件保留于 %s，请检查并清理。\n' "$ERROR" "$dir" >&2; return 1
     fi
+    if run_as_target ssh-keygen -y -P '' -f "$dir/PrivateKey" >/dev/null 2>&1; then
+        printf '%b 检测到空口令私钥，已拒绝并删除；请重新生成并设置非空口令。\n' "$ERROR" >&2
+        generated_key_files delete "$dir" || printf '%b 删除未完成，请检查 %s。\n' "$ERROR" "$dir" >&2
+        return 1
+    fi
     pub_content="$(generated_key_files read "$dir")" || return 1
     if ! append_key_with_meta "$pub_content" 'VPS本地生成'; then
         printf '%b 公钥导入失败，暂存密钥仍在 %s，请保存后清理。\n' "$ERROR" "$dir" >&2; return 1
@@ -1704,6 +1819,11 @@ install_key_menu() {
                         continue
                     fi
                 else
+                    if ! confirm_remote_key_fingerprints "$pub_key" "GitHub 用户 ${gh_user}"; then
+                        printf '%b 未完成可信指纹核对，已取消导入。\n' "$ERROR" >&2
+                        read -rp "按回车键继续..."
+                        continue
+                    fi
                     if append_key_with_meta "$pub_key" "GitHub: ${gh_user}"; then
                         test_hint="请使用该 GitHub 公钥对应的本地私钥，新建终端测试连接。"
                         do_restart=1
@@ -1731,6 +1851,11 @@ install_key_menu() {
                 local pub_key
                 if ! pub_key="$(fetch_public_keys "$key_url")"; then
                     echo -e "${ERROR} 从 URL 获取公钥失败！"
+                    read -rp "按回车键继续..."
+                    continue
+                fi
+                if ! confirm_remote_key_fingerprints "$pub_key" '自定义 URL'; then
+                    printf '%b 未完成可信指纹核对，已取消导入。\n' "$ERROR" >&2
                     read -rp "按回车键继续..."
                     continue
                 fi
@@ -1944,6 +2069,10 @@ publickey_login_ready() {
     done
     [ "$matched" -eq 1 ] || {
         printf '%b sshd 没有从脚本管理的 authorized_keys 路径读取公钥，拒绝关闭密码登录。\n' "$ERROR" >&2; return 1;
+    }
+    verify_key_path_security || {
+        printf '%b 密钥路径的所有者或权限不满足 OpenSSH StrictModes，拒绝关闭密码登录。\n' "$ERROR" >&2
+        return 1
     }
     content="$(read_authorized_keys)" || return 1
     while IFS= read -r line; do
@@ -2314,6 +2443,10 @@ change_ssh_port() {
         read -rp "按回车键返回主菜单..."
         return 1
     fi
+    if ! f2b_port_sync_preflight; then
+        read -rp "按回车键返回主菜单..."
+        return 1
+    fi
 
     warn_or_abort_unmanaged_fw interactive || {
         read -rp "按回车键返回主菜单..."
@@ -2463,12 +2596,15 @@ if [ -n "$CLI_GH_USER" ] || [ -n "$CLI_KEY_URL" ] || [ -n "$CLI_KEY_FILE" ] || \
             printf '%b %s 正在活动或已启用，不能由本脚本修改 SSH 端口。\n' "$ERROR" "$cli_socket_unit" >&2; exit 1
         elif ! port_available_for_sshd "$current_port" "$CLI_PORT"; then
             printf '%b 端口预检失败，尚未导入公钥。\n' "$ERROR" >&2; exit 1
+        elif ! f2b_port_sync_preflight; then
+            printf '%b Fail2Ban 端口同步预检失败，尚未修改 SSH。\n' "$ERROR" >&2; exit 1
         fi
     fi
 
     # 1. 先下载并验证全部公钥。任何来源失败时，authorized_keys 保持原样。
     declare -a CLI_KEY_CONTENTS=()
     declare -a CLI_KEY_TAGS=()
+    declare -a CLI_REMOTE_KEY_CONTENTS=()
     if [ -n "$CLI_GH_USER" ]; then
         [[ "$CLI_GH_USER" =~ ^[A-Za-z0-9-]+$ ]] || {
             echo -e "${ERROR} GitHub 用户名格式不正确"; exit 1;
@@ -2478,6 +2614,7 @@ if [ -n "$CLI_GH_USER" ] || [ -n "$CLI_KEY_URL" ] || [ -n "$CLI_KEY_FILE" ] || \
         fi
         CLI_KEY_CONTENTS+=("$PUB_KEY")
         CLI_KEY_TAGS+=("GitHub: ${CLI_GH_USER}")
+        CLI_REMOTE_KEY_CONTENTS+=("$PUB_KEY")
     fi
 
     if [ -n "$CLI_KEY_URL" ]; then
@@ -2489,6 +2626,7 @@ if [ -n "$CLI_GH_USER" ] || [ -n "$CLI_KEY_URL" ] || [ -n "$CLI_KEY_FILE" ] || \
         fi
         CLI_KEY_CONTENTS+=("$PUB_KEY")
         CLI_KEY_TAGS+=("自定义URL")
+        CLI_REMOTE_KEY_CONTENTS+=("$PUB_KEY")
     fi
 
     if [ -n "$CLI_KEY_FILE" ]; then
@@ -2506,6 +2644,13 @@ if [ -n "$CLI_GH_USER" ] || [ -n "$CLI_KEY_URL" ] || [ -n "$CLI_KEY_FILE" ] || \
             echo -e "${ERROR} 已取消导入，原 authorized_keys 未修改。"; exit 1;
         }
     done
+    if [ "${#CLI_REMOTE_KEY_CONTENTS[@]}" -gt 0 ]; then
+        CLI_REMOTE_KEY_BLOB="$(printf '%s\n' "${CLI_REMOTE_KEY_CONTENTS[@]}")"
+        if ! verify_public_key_fingerprints "$CLI_REMOTE_KEY_BLOB" "${KEY_SH_EXPECTED_FINGERPRINTS:-}"; then
+            printf '%b CLI 远程公钥导入必须提供完全匹配的 KEY_SH_EXPECTED_FINGERPRINTS。\n' "$ERROR" >&2
+            exit 1
+        fi
+    fi
 
     # 2. 先准备端口事务；后续任何失败都会由 EXIT 恢复 SSH 和本轮防火墙变更。
     if [ -n "$CLI_PORT" ]; then
