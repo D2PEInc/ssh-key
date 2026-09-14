@@ -16,7 +16,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"
-BLUE="\033[34m"; PURPLE="\033[35m"; CYAN="\033[36m"
+PURPLE="\033[35m"; CYAN="\033[36m"
 GRAY="\033[90m"; BOLD="\033[1m"; RESET="\033[0m"
 
 INFO="${GREEN}[INFO]${RESET}"; WARN="${YELLOW}[WARN]${RESET}"; ERROR="${RED}[ERROR]${RESET}"
@@ -34,7 +34,7 @@ SSHD_MANAGED_END="# END key.sh managed include"
 
 [ "$EUID" -ne 0 ] && SUDO="sudo" || SUDO=""
 
-PKG_MGR=""; INIT_SYS=""; SSH_LOG=""; OS_NAME=""; OS_ID=""; OS_VER=""; OS_SHORT=""
+PKG_MGR=""; INIT_SYS=""; SSH_LOG=""; OS_ID=""; OS_VER=""; OS_SHORT=""
 SSHD_TXN_DIR=""
 
 # 使用 sudo 运行时，默认管理原登录用户，而不是误写 /root/.ssh。
@@ -54,7 +54,6 @@ resolve_target_user() {
     fi
 
     TARGET_UID="$(id -u "$TARGET_USER")"
-    TARGET_GID="$(id -g "$TARGET_USER")"
     if command -v getent >/dev/null 2>&1; then
         TARGET_HOME="$(getent passwd "$TARGET_USER" 2>/dev/null | awk -F: 'NR==1 {print $6}')"
     else
@@ -111,6 +110,7 @@ SSH Security Installer
   KEY_SH_TARGET_USER=用户名   指定要管理的用户
   KEY_SH_ALLOW_UNMANAGED_FW=1  在无 ufw/firewalld 且检测到限制性 iptables/nft 时仍允许改端口（CLI）
   KEY_SH_FIREWALLD_ZONE=区域   多个 firewalld 活动区域且无法识别入站接口时，明确指定区域
+  KEY_SH_CONFIRMED_PASSWORD_LOGIN=1  使用 -o 替换现有有效公钥前，确认已测试密码备用连接
 
 其他:
   -h, --help     显示帮助
@@ -126,9 +126,9 @@ esac
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        OS_NAME="${NAME:-Unknown}"; OS_ID="${ID:-unknown}"; OS_VER="${VERSION_ID:-}"
+        OS_ID="${ID:-unknown}"; OS_VER="${VERSION_ID:-}"
     else
-        OS_NAME=$(uname -s); OS_VER=$(uname -r); OS_ID="unknown"
+        OS_VER=$(uname -r); OS_ID="unknown"
     fi
     case "$OS_ID" in
         debian) OS_SHORT="Debian" ;;
@@ -313,6 +313,25 @@ require_sshd_val() {
 port_list_contains() {
     local list="$1" want="$2"
     [[ ",${list}," == *",${want},"* ]]
+}
+
+# sshd -T -C 无法可靠重放反向 DNS 主机名或路由域；高风险认证切换遇到这类 Match 时停止。
+sshd_has_unverifiable_match() {
+    local file
+    for file in "$SSHD_MAIN" "$SSHD_CUSTOM" "$SSHD_LEGACY"; do
+        if $SUDO test -f "$file" &&
+           $SUDO grep -qiE '^[[:space:]]*Match[[:space:]].*[[:space:]](Host|RDomain)[[:space:]]' -- "$file" 2>/dev/null; then
+            return 0
+        fi
+    done
+    if $SUDO test -d "$SSHD_CONF_DIR"; then
+        while IFS= read -r -d '' file; do
+            if $SUDO grep -qiE '^[[:space:]]*Match[[:space:]].*[[:space:]](Host|RDomain)[[:space:]]' -- "$file" 2>/dev/null; then
+                return 0
+            fi
+        done < <($SUDO find "$SSHD_CONF_DIR" -maxdepth 1 -type f -name '*.conf' -print0 2>/dev/null)
+    fi
+    return 1
 }
 
 # /run 由 root 管理，锁目录同时存放完整快照；失败快照不会作为有效事务发布。
@@ -618,9 +637,9 @@ verify_sshd_expected_values() {
 
 restart_sshd() {
     local sshd_bin restart_ok=1 ssh_unit="" socket_active=0 socket_unit="" candidate=""
-    local i listen_rc recovery_ok=1 recovery_port="" remote_ip="" remote_src_port="" local_ip=""
+    local listen_rc recovery_ok=1 recovery_port="" remote_ip="" local_ip=""
     if [ -n "${SSH_CONNECTION:-}" ]; then
-        read -r remote_ip remote_src_port local_ip recovery_port <<< "$SSH_CONNECTION"
+        read -r remote_ip _ local_ip recovery_port <<< "$SSH_CONNECTION"
     fi
     sshd_bin="$(get_sshd_bin)"
     echo -e "${INFO} 正在检测 SSH 配置语法和实际生效值..."
@@ -663,7 +682,7 @@ restart_sshd() {
 
     if [ "$restart_ok" -eq 0 ] && [ -n "${SSHD_EXPECTED[port]:-}" ]; then
         restart_ok=1
-        for i in {1..5}; do
+        for _ in {1..5}; do
             port_is_listening "${SSHD_EXPECTED[port]}"; listen_rc=$?
             if [ "$listen_rc" -eq 0 ]; then restart_ok=0; break; fi
             [ "$listen_rc" -eq 2 ] && break
@@ -748,7 +767,7 @@ target_key_worker() {
     esac
     {
         printf 'set +x; umask 077\n'
-        for name in TARGET_USER TARGET_UID TARGET_GID TARGET_HOME SSH_DIR AUTHORIZED_KEYS INFO WARN ERROR GREEN RESET; do
+        for name in TARGET_USER TARGET_UID TARGET_HOME SSH_DIR AUTHORIZED_KEYS INFO WARN ERROR GREEN RESET; do
             printf '%s=%q\n' "$name" "${!name}"
         done
         declare -f run_as_target target_key_worker safe_key_paths init_ssh_dir read_authorized_keys \
@@ -1072,7 +1091,7 @@ restart_f2b() {
     echo -e "${INFO} 正在重载 Fail2Ban 配置..."
     $SUDO fail2ban-client -t >/dev/null 2>&1 || { printf '%b Fail2Ban 配置检查失败，未重启。\n' "$ERROR" >&2; return 1; }
     svc_restart fail2ban || return 1
-    for i in {1..5}; do
+    for _ in {1..5}; do
         if f2b_jail_is_active; then
             echo -e "${INFO} ${GREEN}成功！配置已生效。${RESET}"; return 0
         fi; sleep 1
@@ -1333,7 +1352,7 @@ toggle_f2b_service() {
         read -rp "是否启用并启动 Fail2Ban? (y/N): " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
             svc_enable fail2ban; svc_start fail2ban
-            for i in {1..5}; do
+            for _ in {1..5}; do
                 if f2b_jail_is_active; then echo -e "${INFO} ${GREEN}服务及 sshd jail 已成功启动。${RESET}"; read -rp "按回车键继续..."; return; fi; sleep 1
             done
             echo -e "${ERROR} 启动失败或超时。"
@@ -1868,6 +1887,10 @@ manage_keys_menu() {
 # 防误锁检查是保守的静态检查；-c/交互确认仍需用户完成真实新连接。
 password_login_ready() {
     local context_port="${1:-}" dump method permit_root
+    if sshd_has_unverifiable_match; then
+        printf '%b 检测到 Match Host/RDomain，无法可靠重放该连接上下文；已拒绝关闭公钥登录。\n' "$ERROR" >&2
+        return 1
+    fi
     dump="$(sshd_effective_dump "$context_port")" || {
         printf '%b 无法解析 sshd 配置，不能确认密码备用登录。\n' "$ERROR" >&2; return 1;
     }
@@ -1890,7 +1913,7 @@ password_login_ready() {
 
 confirm_password_fallback() {
     local purpose="$1"
-    password_login_ready || return 1
+    password_login_ready "" || return 1
     printf '%b 请保留当前会话，先用目标用户 %s 和密码建立一条新的 SSH 连接。\n' "$WARN" "$TARGET_USER"
     local confirm
     read -rp "已成功测试密码备用连接，继续${purpose}吗？(y/N): " confirm || return 1
@@ -1899,6 +1922,10 @@ confirm_password_fallback() {
 
 publickey_login_ready() {
     local context_port="${1:-}" dump files file matched=0 content line method
+    if sshd_has_unverifiable_match; then
+        printf '%b 检测到 Match Host/RDomain，无法可靠重放该连接上下文；已拒绝关闭密码登录。\n' "$ERROR" >&2
+        return 1
+    fi
     dump="$(sshd_effective_dump "$context_port")" || { printf '%b 无法解析 sshd 配置，拒绝关闭密码登录。\n' "$ERROR" >&2; return 1; }
     [ "$(awk '$1=="pubkeyauthentication" {print $2; exit}' <<< "$dump")" = yes ] || return 1
     method="$(awk '$1=="authenticationmethods" {$1=""; sub(/^ /, ""); print; exit}' <<< "$dump")"
@@ -1965,7 +1992,7 @@ toggle_password_login() {
         read -rp "为目标用户设置新密码吗？(y/N): " pwd_confirm || return 0
         [[ "$pwd_confirm" =~ ^[Yy]$ ]] && $SUDO passwd "$TARGET_USER"
     elif [ "$current" = yes ]; then
-        publickey_login_ready || { printf '%b 未通过防误锁检查，保留密码登录。\n' "$ERROR" >&2; return 1; }
+        publickey_login_ready "" || { printf '%b 未通过防误锁检查，保留密码登录。\n' "$ERROR" >&2; return 1; }
         printf '%b 请保留当前会话，并用目标用户和本地私钥建立一条新的 SSH 连接。\n' "$WARN"
         read -rp "已成功建立新连接，现在禁用密码登录吗？(y/N): " confirm || return 1
         [[ "$confirm" =~ ^[Yy]$ ]] || return 0
@@ -1992,6 +2019,19 @@ reset_port_fw_tracking() {
     PORT_FW_FIREWALLD_PORT=""; PORT_FW_FIREWALLD_ZONE=""
     PORT_FW_FIREWALLD_RUNTIME_ADDED=""; PORT_FW_FIREWALLD_PERMANENT_ADDED=""
     PORT_FW_SELINUX_ADDED=""
+}
+
+port_fw_tracking_pending() {
+    [ -n "$PORT_FW_UFW_ADDED" ] || [ -n "$PORT_FW_FIREWALLD_RUNTIME_ADDED" ] ||
+        [ -n "$PORT_FW_FIREWALLD_PERMANENT_ADDED" ] || [ -n "$PORT_FW_SELINUX_ADDED" ]
+}
+
+begin_port_fw_tracking() {
+    if port_fw_tracking_pending; then
+        printf '%b 上一次端口放行尚未完成回滚，已拒绝覆盖跟踪状态；请先从控制台处理。\n' "$ERROR" >&2
+        return 1
+    fi
+    reset_port_fw_tracking
 }
 
 rollback_port_fw_changes() {
@@ -2125,7 +2165,7 @@ resolve_firewalld_zone() {
 # 为新端口准备 SELinux/防火墙；仅标记本轮新增项。失败返回 1。
 prepare_port_access() {
     local new_port="$1" selinux_ports="" fw_zone="" query_rc runtime_present=0 permanent_present=0 ufw_status=""
-    reset_port_fw_tracking
+    begin_port_fw_tracking || return 1
     if command -v getenforce &>/dev/null && [ "$(getenforce 2>/dev/null)" != "Disabled" ]; then
         echo -e "${INFO} 检测到 SELinux 启用，正在申请放行端口 ${new_port}..."
         if ! command -v semanage &>/dev/null; then
@@ -2388,6 +2428,10 @@ if [ "$OVERWRITE" -eq 1 ] && [ -z "$CLI_GH_USER" ] && [ -z "$CLI_KEY_URL" ] && [
     echo -e "${YELLOW}单独执行 -o 会清空 authorized_keys 中所有公钥，已阻止。${RESET}"
     exit 1
 fi
+if [ "$OVERWRITE" -eq 1 ] && [ -n "$CLI_PORT" ]; then
+    printf '%b -o 覆盖现有公钥和修改端口必须分两次执行并分别测试。\n' "$ERROR" >&2
+    exit 1
+fi
 
 check_dependencies || exit 1
 
@@ -2397,6 +2441,19 @@ if [ -n "$CLI_GH_USER" ] || [ -n "$CLI_KEY_URL" ] || [ -n "$CLI_KEY_FILE" ] || \
 
     need_restart_sshd=0
     need_restart_f2b=0
+
+    if [ "$OVERWRITE" -eq 1 ]; then
+        if ! current_key_count="$(count_authorized_keys)"; then exit 1; fi
+        if [ "$current_key_count" -gt 0 ]; then
+            [ "${KEY_SH_CONFIRMED_PASSWORD_LOGIN:-0}" = 1 ] || {
+                printf '%b 覆盖现有有效公钥前，请先测试密码备用连接并设置 KEY_SH_CONFIRMED_PASSWORD_LOGIN=1。\n' "$ERROR" >&2
+                exit 1
+            }
+            password_login_ready "" || {
+                printf '%b 无法确认密码备用登录，已拒绝覆盖现有公钥。\n' "$ERROR" >&2; exit 1;
+            }
+        fi
+    fi
 
     if [ -n "$CLI_PORT" ]; then
         if ! current_port="$(require_sshd_val Port 22)"; then exit 1; fi
@@ -2450,20 +2507,7 @@ if [ -n "$CLI_GH_USER" ] || [ -n "$CLI_KEY_URL" ] || [ -n "$CLI_KEY_FILE" ] || \
         }
     done
 
-    if [ "${#CLI_KEY_CONTENTS[@]}" -gt 0 ]; then
-        declare -a CLI_KEY_BATCH=()
-        local_i=0
-        for local_i in "${!CLI_KEY_CONTENTS[@]}"; do
-            CLI_KEY_BATCH+=("${CLI_KEY_CONTENTS[$local_i]}" "${CLI_KEY_TAGS[$local_i]}")
-        done
-        append_keys_with_meta_batch "$OVERWRITE" "${CLI_KEY_BATCH[@]}" || exit 1
-    fi
-    if [ "${#CLI_KEY_CONTENTS[@]}" -gt 0 ]; then
-        set_sshd_config "PubkeyAuthentication" "yes" || exit 1
-        need_restart_sshd=1
-    fi
-
-    # 2. 修改端口
+    # 2. 先准备端口事务；后续任何失败都会由 EXIT 恢复 SSH 和本轮防火墙变更。
     if [ -n "$CLI_PORT" ]; then
         if ! validate_ssh_port "$CLI_PORT"; then
             echo -e "${ERROR} 端口格式不正确！" && exit 1
@@ -2484,9 +2528,21 @@ if [ -n "$CLI_GH_USER" ] || [ -n "$CLI_KEY_URL" ] || [ -n "$CLI_KEY_FILE" ] || \
         fi
     fi
 
-    # 3. 禁用密码登录（写入全局默认；现有 Match 块仍可能另行覆盖）
+    # 3. 所有来源在同一把锁下只提交一次。
+    if [ "${#CLI_KEY_CONTENTS[@]}" -gt 0 ]; then
+        declare -a CLI_KEY_BATCH=()
+        local_i=0
+        for local_i in "${!CLI_KEY_CONTENTS[@]}"; do
+            CLI_KEY_BATCH+=("${CLI_KEY_CONTENTS[$local_i]}" "${CLI_KEY_TAGS[$local_i]}")
+        done
+        append_keys_with_meta_batch "$OVERWRITE" "${CLI_KEY_BATCH[@]}" || exit 1
+        set_sshd_config "PubkeyAuthentication" "yes" || exit 1
+        need_restart_sshd=1
+    fi
+
+    # 4. 禁用密码登录（写入全局默认；现有 Match 块仍可能另行覆盖）
     if [ "$CLI_DISABLE_PWD" -eq 1 ]; then
-        publickey_login_ready || { printf '%b 未通过防误锁检查，拒绝禁用密码登录。\n' "$ERROR" >&2; exit 1; }
+        publickey_login_ready "" || { printf '%b 未通过防误锁检查，拒绝禁用密码登录。\n' "$ERROR" >&2; exit 1; }
         warn_global_password_disable cli || exit 1
         set_sshd_config "PasswordAuthentication" "no" || exit 1
         set_sshd_config "ChallengeResponseAuthentication" "no" || exit 1
