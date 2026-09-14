@@ -36,6 +36,7 @@ SSHD_MANAGED_END="# END key.sh managed include"
 
 PKG_MGR=""; INIT_SYS=""; SSH_LOG=""; OS_ID=""; OS_VER=""; OS_SHORT=""
 SSHD_TXN_DIR=""
+TERMINAL_STTY_STATE=""
 
 # 使用 sudo 运行时，默认管理原登录用户，而不是误写 /root/.ssh。
 # 如需管理其他用户，可在运行前设置 KEY_SH_TARGET_USER。
@@ -547,8 +548,65 @@ ensure_sshd_managed_config() {
 
 
 
+restore_terminal_input() {
+    [ -n "$TERMINAL_STTY_STATE" ] || return 0
+    stty "$TERMINAL_STTY_STATE" 2>/dev/null || true
+    TERMINAL_STTY_STATE=""
+}
+
+# 数字菜单使用自己的轻量行编辑，兼容终端把 Backspace 发送为 Ctrl-H 或 DEL。
+read_menu_line() {
+    local prompt="$1" output_var="$2" value='' char rc original
+    if [ ! -t 0 ] || ! command -v stty >/dev/null 2>&1; then
+        read -rp "$prompt" value || return
+        printf -v "$output_var" '%s' "$value"
+        return 0
+    fi
+    original="$(stty -g 2>/dev/null)" || {
+        read -rp "$prompt" value || return
+        printf -v "$output_var" '%s' "$value"
+        return 0
+    }
+    TERMINAL_STTY_STATE="$original"
+    if ! stty -echo -icanon min 1 time 0 2>/dev/null; then
+        TERMINAL_STTY_STATE=""
+        read -rp "$prompt" value || return
+        printf -v "$output_var" '%s' "$value"
+        return 0
+    fi
+    printf '%s' "$prompt"
+    while true; do
+        IFS= read -r -n 1 char; rc=$?
+        if [ "$rc" -ne 0 ]; then
+            restore_terminal_input
+            printf '\n'
+            return "$rc"
+        fi
+        if [ -z "$char" ]; then
+            printf '\n'
+            break
+        fi
+        case "$char" in
+            $'\b'|$'\177')
+                if [ -n "$value" ]; then
+                    value="${value%?}"
+                    printf '\b \b'
+                fi
+                ;;
+            [[:alnum:],\ ])
+                value+="$char"
+                printf '%s' "$char"
+                ;;
+            *) printf '\a' ;;
+        esac
+    done
+    restore_terminal_input
+    printf -v "$output_var" '%s' "$value"
+}
+
 cleanup_pending_changes() {
     local failed=0
+    restore_terminal_input
     if [ -n "$SSHD_TXN_DIR" ]; then
         rollback_sshd_transaction 1 || failed=1
     fi
@@ -1901,7 +1959,7 @@ install_key_menu() {
 # ============ 已存公钥管理 ============
 manage_keys_menu() {
     init_ssh_dir || return 1
-    local auth_file="$AUTHORIZED_KEYS" key_snapshot
+    local auth_file="$AUTHORIZED_KEYS" key_snapshot key_action=''
 
     while true; do
         clear
@@ -1964,8 +2022,7 @@ manage_keys_menu() {
         echo -e " 输入 ${RED}[all]${RESET}      : 清空全部公钥"
         echo -e " 输入 ${GREEN}[0]${RESET}        : 返回上级菜单"
         echo -e "${CYAN}============================================================${RESET}"
-        # Readline 同时处理终端发送的 Ctrl-H 和 DEL，避免退格键显示为 ^H。
-        read -erp "请输入操作指令: " key_action || return
+        read_menu_line "请输入操作指令: " key_action || return
 
         if [ "$key_action" == "0" ]; then
             return
