@@ -1,4 +1,4 @@
-# SSH Security Installer
+# SSH Key
 
 一个面向 Linux VPS 的交互式 SSH 加固脚本，用于管理公钥、SSH 登录方式、SSH 端口和 Fail2Ban。
 
@@ -22,8 +22,8 @@
 ## 安装
 
 ```bash
-git clone https://github.com/D2PEInc/ssh-security-installer.git
-cd ssh-security-installer
+git clone https://github.com/D2PEInc/ssh-key.git
+cd ssh-key
 chmod +x key.sh
 ./key.sh
 ```

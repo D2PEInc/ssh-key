@@ -1,6 +1,6 @@
 #!/bin/bash
 #=============================================================
-# SSH Security Installer (key.sh)
+# SSH Key (key.sh)
 # Multi-distro: Debian/Ubuntu, RHEL/CentOS/Fedora/Rocky/Alma,
 #               Alpine, Arch/Manjaro, openSUSE
 #=============================================================
@@ -88,7 +88,7 @@ resolve_target_user
 case "${1:-}" in
     -h|--help)
         cat <<HELP
-SSH Security Installer
+SSH Key
 
 用法:
   $0 [选项]
