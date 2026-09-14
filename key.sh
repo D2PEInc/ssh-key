@@ -37,6 +37,7 @@ SSHD_MANAGED_END="# END key.sh managed include"
 PKG_MGR=""; INIT_SYS=""; SSH_LOG=""; OS_ID=""; OS_VER=""; OS_SHORT=""
 SSHD_TXN_DIR=""
 TERMINAL_STTY_STATE=""
+SELECTED_PUBLIC_KEYS=""
 
 # 使用 sudo 运行时，默认管理原登录用户，而不是误写 /root/.ssh。
 # 如需管理其他用户，可在运行前设置 KEY_SH_TARGET_USER。
@@ -559,11 +560,13 @@ read_menu_line() {
     local prompt="$1" output_var="$2" value='' char rc original
     if [ ! -t 0 ] || ! command -v stty >/dev/null 2>&1; then
         read -erp "$prompt" value || return
+        value="${value%$'\r'}"
         printf -v "$output_var" '%s' "$value"
         return 0
     fi
     original="$(stty -g 2>/dev/null)" || {
         read -erp "$prompt" value || return
+        value="${value%$'\r'}"
         printf -v "$output_var" '%s' "$value"
         return 0
     }
@@ -571,6 +574,7 @@ read_menu_line() {
     if ! stty -echo -icanon min 1 time 0 2>/dev/null; then
         TERMINAL_STTY_STATE=""
         read -erp "$prompt" value || return
+        value="${value%$'\r'}"
         printf -v "$output_var" '%s' "$value"
         return 0
     fi
@@ -982,13 +986,58 @@ verify_public_key_fingerprints() {
     fi
 }
 
-confirm_remote_key_fingerprints() {
-    local content="$1" label="$2" actual expected
-    actual="$(public_key_fingerprints "$content")" || return 1
-    [ -n "$actual" ] || return 1
-    printf '%b %s 返回的公钥指纹：\n%s\n' "$INFO" "$label" "$actual"
-    read -erp '请输入通过可信渠道获得的预期 SHA256 指纹（多个用空格分隔，留空取消）: ' expected || return 1
-    [ -n "$expected" ] && verify_public_key_fingerprints "$content" "$expected"
+select_remote_public_keys() {
+    local content="$1" label="$2" line key_type key_comment info fp
+    local selection token selected='' selected_count=0 tmp i
+    local -a keys=() fingerprints=() key_types=() key_comments=() selected_tokens=()
+    local -A chosen=()
+    SELECTED_PUBLIC_KEYS=""
+
+    validate_public_key_content "$content" || return 1
+    tmp="$(mktemp)" || return 1
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:blank:]]*$ || "$line" =~ ^[[:blank:]]*# ]] && continue
+        printf '%s\n' "$line" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+        info="$(ssh-keygen -l -f "$tmp" 2>/dev/null)" || { rm -f -- "$tmp"; return 1; }
+        fp="$(awk 'NR==1 {print $2}' <<< "$info")"
+        [ -n "$fp" ] || { rm -f -- "$tmp"; return 1; }
+        read -r key_type _ key_comment <<< "$line"
+        keys+=("$line")
+        fingerprints+=("$fp")
+        key_types+=("$key_type")
+        key_comments+=("${key_comment:-无备注}")
+    done <<< "$content"
+    rm -f -- "$tmp"
+
+    [ "${#keys[@]}" -gt 0 ] || return 1
+    printf '%b %s 返回的公钥：\n' "$INFO" "$label"
+    for ((i=0; i<${#keys[@]}; i++)); do
+        printf ' [%d] %s | %s | %s\n' "$((i + 1))" "${fingerprints[$i]}" "${key_types[$i]}" "${key_comments[$i]}"
+    done
+    printf '%b 序号只用于选择；请先通过另一可信渠道核对对应的 SHA256 指纹。\n' "$WARN"
+    read_menu_line '输入已核对并要导入的序号（如 1 2，0取消）: ' selection || return 1
+    [ "$selection" != "0" ] && [ -n "$selection" ] || return 1
+
+    selection="${selection//,/ }"
+    read -r -a selected_tokens <<< "$selection"
+    [ "${#selected_tokens[@]}" -gt 0 ] || return 1
+    for token in "${selected_tokens[@]}"; do
+        if [[ ! "$token" =~ ^[1-9][0-9]{0,5}$ ]] || [ "$((10#$token))" -gt "${#keys[@]}" ]; then
+            printf '%b 无效公钥序号：%s\n' "$ERROR" "$token" >&2
+            return 1
+        fi
+        chosen["$token"]=1
+    done
+    for ((i=1; i<=${#keys[@]}; i++)); do
+        if [ -n "${chosen[$i]:-}" ]; then
+            selected+="${keys[$((i - 1))]}"$'\n'
+            ((selected_count+=1))
+        fi
+    done
+    [ "$selected_count" -gt 0 ] || return 1
+    SELECTED_PUBLIC_KEYS="${selected%$'\n'}"
+    printf '%b 已选择 %s 把经过核对的公钥。\n' "$INFO" "$selected_count"
 }
 
 # 调用方持有 .key-sh.lock；stage 与目标在同一目录，install 失败绝不提交。
@@ -1886,11 +1935,12 @@ install_key_menu() {
                         continue
                     fi
                 else
-                    if ! confirm_remote_key_fingerprints "$pub_key" "GitHub 用户 ${gh_user}"; then
+                    if ! select_remote_public_keys "$pub_key" "GitHub 用户 ${gh_user}"; then
                         printf '%b 未完成可信指纹核对，已取消导入。\n' "$ERROR" >&2
                         read -erp "按回车键继续..."
                         continue
                     fi
+                    pub_key="$SELECTED_PUBLIC_KEYS"
                     if append_key_with_meta "$pub_key" "GitHub: ${gh_user}"; then
                         test_hint="请使用该 GitHub 公钥对应的本地私钥，新建终端测试连接。"
                         do_restart=1
@@ -1921,11 +1971,12 @@ install_key_menu() {
                     read -erp "按回车键继续..."
                     continue
                 fi
-                if ! confirm_remote_key_fingerprints "$pub_key" '自定义 URL'; then
+                if ! select_remote_public_keys "$pub_key" '自定义 URL'; then
                     printf '%b 未完成可信指纹核对，已取消导入。\n' "$ERROR" >&2
                     read -erp "按回车键继续..."
                     continue
                 fi
+                pub_key="$SELECTED_PUBLIC_KEYS"
                 if append_key_with_meta "$pub_key" "自定义URL"; then
                     test_hint="请使用该公钥对应的本地私钥，新建终端测试连接。"
                     do_restart=1
