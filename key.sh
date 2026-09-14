@@ -1046,8 +1046,14 @@ remove_authorized_key() {
         work="$(mktemp -d "${SSH_DIR}/.key-sh.work.XXXXXX")" || return 1
         trap 'rm -f -- "$work/candidate"; rmdir -- "$work"' EXIT
         if [ "$action" = all ]; then : > "$work/candidate"
-        elif [[ "$action" =~ ^[1-9][0-9]*$ ]]; then
-            awk -v n="$action" 'NR != n {print}' "$AUTHORIZED_KEYS" > "$work/candidate" || return 1
+        elif [[ "$action" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; then
+            awk -v numbers="$action" '
+                BEGIN {
+                    count=split(numbers, selected, ",")
+                    for (i=1; i<=count; i++) remove[selected[i]]=1
+                }
+                !(NR in remove) {print}
+            ' "$AUTHORIZED_KEYS" > "$work/candidate" || return 1
         else return 1; fi
         commit_authorized_keys "$work/candidate"
     )
@@ -1953,17 +1959,22 @@ manage_keys_menu() {
         done
 
         echo -e "${CYAN}============================================================${RESET}"
-        echo -e " 输入 ${RED}[序号]${RESET} : 删除指定公钥"
-        echo -e " 输入 ${RED}[all]${RESET}  : 清空全部公钥"
-        echo -e " 输入 ${GREEN}[0]${RESET}    : 返回上级菜单"
+        echo -e " 输入 ${RED}[序号]${RESET}     : 删除指定公钥"
+        echo -e " 输入 ${RED}[1 2 5]${RESET}    : 同时删除多个公钥（空格或逗号分隔）"
+        echo -e " 输入 ${RED}[all]${RESET}      : 清空全部公钥"
+        echo -e " 输入 ${GREEN}[0]${RESET}        : 返回上级菜单"
         echo -e "${CYAN}============================================================${RESET}"
-        read -rp "请输入操作指令: " key_action || return
+        # Readline 同时处理终端发送的 Ctrl-H 和 DEL，避免退格键显示为 ^H。
+        read -erp "请输入操作指令: " key_action || return
 
         if [ "$key_action" == "0" ]; then
             return
         elif [ "$key_action" == "all" ]; then
             local valid_key_count confirm_all
-            valid_key_count="$(count_authorized_keys)"
+            if ! valid_key_count="$(count_authorized_keys)"; then
+                printf '%b 无法可靠统计有效公钥，已取消清空。\n' "$ERROR" >&2
+                read -rp "按回车继续..." || return; continue
+            fi
             if [ "$valid_key_count" -gt 0 ]; then
                 if confirm_password_fallback "清空全部有效公钥"; then confirm_all=y
                 else
@@ -1979,31 +1990,62 @@ manage_keys_menu() {
                 sleep 1
                 continue
             fi
-        elif [[ "$key_action" =~ ^[0-9]+$ ]] && [ "$key_action" -ge 1 ] && [ "$key_action" -le "${#key_contents[@]}" ]; then
-            local target_idx=$((10#$key_action - 1))
-            local target_line_num="${key_lines[$target_idx]}"
+        else
+            local normalized_action="${key_action//,/ }" token target_idx
+            local invalid_selection=0 selected_valid_count=0
+            local selected_label='' target_line_numbers=''
+            local -a requested_indices=() selected_indices=()
+            local -A selected_seen=()
+            read -r -a requested_indices <<< "$normalized_action"
+            [ "${#requested_indices[@]}" -gt 0 ] || invalid_selection=1
+            for token in "${requested_indices[@]}"; do
+                if [[ ! "$token" =~ ^[0-9]+$ ]] ||
+                   [ "$((10#$token))" -lt 1 ] || [ "$((10#$token))" -gt "${#key_contents[@]}" ]; then
+                    invalid_selection=1
+                    break
+                fi
+                token="$((10#$token))"
+                [ -z "${selected_seen[$token]:-}" ] || continue
+                selected_seen[$token]=1
+                selected_indices+=("$token")
+            done
+            if [ "$invalid_selection" -ne 0 ] || [ "${#selected_indices[@]}" -eq 0 ]; then
+                echo -e "${ERROR} 输入无效；请输入一个或多个列表序号。"
+                sleep 1
+                continue
+            fi
+
+            for token in "${selected_indices[@]}"; do
+                target_idx=$((token - 1))
+                [ -z "$selected_label" ] || selected_label+=","
+                selected_label+="$token"
+                [ -z "$target_line_numbers" ] || target_line_numbers+=","
+                target_line_numbers+="${key_lines[$target_idx]}"
+                if authorized_key_line_is_valid "${key_contents[$target_idx]}"; then
+                    ((selected_valid_count+=1))
+                fi
+            done
 
             local valid_key_count confirm_del
-            valid_key_count="$(count_authorized_keys)"
-            if [ "$valid_key_count" -le 1 ] && authorized_key_line_is_valid "${key_contents[$target_idx]}"; then
-                if confirm_password_fallback "删除最后一把有效公钥"; then confirm_del=y
+            if ! valid_key_count="$(count_authorized_keys)"; then
+                printf '%b 无法可靠统计有效公钥，已取消删除。\n' "$ERROR" >&2
+                read -rp "按回车继续..." || return; continue
+            fi
+            if [ "$valid_key_count" -gt 0 ] && [ "$selected_valid_count" -ge "$valid_key_count" ]; then
+                if confirm_password_fallback "删除选中的全部有效公钥"; then confirm_del=y
                 else
                     printf '%b 未确认可用的密码备用连接，已取消删除。\n' "$ERROR" >&2
                     read -rp "按回车继续..." || return; continue
                 fi
             else
-                read -rp "确认删除序号 [${key_action}] 的公钥吗？(y/N): " confirm_del
+                read -rp "确认删除序号 [${selected_label}] 的公钥吗？(y/N): " confirm_del
             fi
             if [[ "$confirm_del" =~ ^[Yy]$ ]]; then
-                remove_authorized_key "$target_line_num" "$key_snapshot" || { read -rp "删除失败，按回车刷新..."; continue; }
-                echo -e "${INFO} ${GREEN}序号 [${key_action}] 的公钥已成功删除！${RESET}"
+                remove_authorized_key "$target_line_numbers" "$key_snapshot" || { read -rp "删除失败，按回车刷新..."; continue; }
+                echo -e "${INFO} ${GREEN}序号 [${selected_label}] 的公钥已成功删除！${RESET}"
                 sleep 1
                 continue
             fi
-        else
-            echo -e "${ERROR} 输入无效，请重新输入！"
-            sleep 1
-            continue
         fi
     done
 }
