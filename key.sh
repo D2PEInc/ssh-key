@@ -558,19 +558,19 @@ restore_terminal_input() {
 read_menu_line() {
     local prompt="$1" output_var="$2" value='' char rc original
     if [ ! -t 0 ] || ! command -v stty >/dev/null 2>&1; then
-        read -rp "$prompt" value || return
+        read -erp "$prompt" value || return
         printf -v "$output_var" '%s' "$value"
         return 0
     fi
     original="$(stty -g 2>/dev/null)" || {
-        read -rp "$prompt" value || return
+        read -erp "$prompt" value || return
         printf -v "$output_var" '%s' "$value"
         return 0
     }
     TERMINAL_STTY_STATE="$original"
     if ! stty -echo -icanon min 1 time 0 2>/dev/null; then
         TERMINAL_STTY_STATE=""
-        read -rp "$prompt" value || return
+        read -erp "$prompt" value || return
         printf -v "$output_var" '%s' "$value"
         return 0
     fi
@@ -987,7 +987,7 @@ confirm_remote_key_fingerprints() {
     actual="$(public_key_fingerprints "$content")" || return 1
     [ -n "$actual" ] || return 1
     printf '%b %s 返回的公钥指纹：\n%s\n' "$INFO" "$label" "$actual"
-    read -rp '请输入通过可信渠道获得的预期 SHA256 指纹（多个用空格分隔，留空取消）: ' expected || return 1
+    read -erp '请输入通过可信渠道获得的预期 SHA256 指纹（多个用空格分隔，留空取消）: ' expected || return 1
     [ -n "$expected" ] && verify_public_key_fingerprints "$content" "$expected"
 }
 
@@ -1421,7 +1421,7 @@ check_f2b_install() {
     hash -r 2>/dev/null
     if ! command -v fail2ban-client >/dev/null 2>&1; then
         echo -e "${WARN} 未检测到 Fail2Ban 服务。"
-        read -rp "是否立即安装 Fail2Ban？(y/N): " install_confirm
+        read -erp "是否立即安装 Fail2Ban？(y/N): " install_confirm
         [[ "$install_confirm" =~ ^[Yy]$ ]] || { echo -e "${WARN} 已取消安装。"; return 1; }
         case "$PKG_MGR" in
             apt) f2b_pkgs=(fail2ban python3-systemd rsyslog) ;;
@@ -1481,9 +1481,9 @@ check_f2b_install() {
 
 uninstall_f2b() {
     echo -e "\n${RED}${BOLD}警告：即将卸载 Fail2Ban 及其配置！${RESET}"
-    read -rp "确认卸载吗？(y/N): " confirm
-    [[ ! "$confirm" =~ ^[Yy]$ ]] && { echo -e "${INFO} 已取消卸载。"; read -rp "按回车键继续..."; return; }
-    read -rp "是否同时删除配置目录 /etc/fail2ban ？(y/N): " del_conf
+    read -erp "确认卸载吗？(y/N): " confirm
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && { echo -e "${INFO} 已取消卸载。"; read -erp "按回车键继续..."; return; }
+    read -erp "是否同时删除配置目录 /etc/fail2ban ？(y/N): " del_conf
     svc_stop fail2ban || true; svc_disable fail2ban || true
     if [[ "$del_conf" =~ ^[Yy]$ ]]; then
         pkg_purge fail2ban || { printf '%b Fail2Ban 软件包卸载失败。\n' "$ERROR" >&2; return 1; }
@@ -1494,7 +1494,7 @@ uninstall_f2b() {
     else
         pkg_remove fail2ban || { printf '%b Fail2Ban 软件包卸载失败，配置未主动删除。\n' "$ERROR" >&2; return 1; }
     fi
-    echo -e "${INFO} ${GREEN}Fail2Ban 卸载完成。${RESET}"; read -rp "按回车键继续..."
+    echo -e "${INFO} ${GREEN}Fail2Ban 卸载完成。${RESET}"; read -erp "按回车键继续..."
 }
 
 change_f2b_param() {
@@ -1504,7 +1504,7 @@ change_f2b_param() {
     echo -e "当前值: ${GREEN}$(fmt_f2b_unit "$current" "$type")${RESET}"
     [ "$type" == "time" ] && echo -e "${GRAY}(支持后缀: s=秒, m=分, h=小时, d=天)${RESET}"
     while true; do
-        read -rp "请输入新值 (留空取消): " new_val
+        read -erp "请输入新值 (留空取消): " new_val
         [ -z "$new_val" ] && return
         if [ "$type" == "time" ] && validate_time "$new_val"; then break; fi
         if [ "$type" == "int" ] && validate_int "$new_val"; then break; fi
@@ -1517,22 +1517,22 @@ change_f2b_param() {
 toggle_f2b_service() {
     echo -e "\n${CYAN}------------------- 服务开关 -------------------${RESET}"
     if f2b_jail_is_active; then
-        read -rp "是否停止并禁用 Fail2Ban? (y/N): " confirm
+        read -erp "是否停止并禁用 Fail2Ban? (y/N): " confirm
         [[ "$confirm" =~ ^[Yy]$ ]] && { svc_stop fail2ban; svc_disable fail2ban; echo -e "${WARN} 服务已停止。${RESET}"; }
     elif $SUDO fail2ban-client ping >/dev/null 2>&1; then
-        read -rp "服务正在运行但 sshd jail 未启用；是否重启并应用配置？(y/N): " confirm
+        read -erp "服务正在运行但 sshd jail 未启用；是否重启并应用配置？(y/N): " confirm
         [[ "$confirm" =~ ^[Yy]$ ]] && restart_f2b
     else
-        read -rp "是否启用并启动 Fail2Ban? (y/N): " confirm
+        read -erp "是否启用并启动 Fail2Ban? (y/N): " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
             svc_enable fail2ban; svc_start fail2ban
             for _ in {1..5}; do
-                if f2b_jail_is_active; then echo -e "${INFO} ${GREEN}服务及 sshd jail 已成功启动。${RESET}"; read -rp "按回车键继续..."; return; fi; sleep 1
+                if f2b_jail_is_active; then echo -e "${INFO} ${GREEN}服务及 sshd jail 已成功启动。${RESET}"; read -erp "按回车键继续..."; return; fi; sleep 1
             done
             echo -e "${ERROR} 启动失败或超时。"
         fi
     fi
-    read -rp "按回车键继续..."
+    read -erp "按回车键继续..."
 }
 
 unban_f2b_ip() {
@@ -1541,17 +1541,17 @@ unban_f2b_ip() {
     banned_list=$($SUDO fail2ban-client status "$TARGET_JAIL" 2>/dev/null | grep "Banned IP list" | awk -F':' '{print $2}' | sed 's/^[ \t]*//')
     [ -z "$banned_list" ] && banned_list="无"
     echo -e "当前被封禁列表: ${YELLOW}${banned_list}${RESET}"
-    read -rp "输入要解封的 IP (留空取消): " target_ip; [ -z "$target_ip" ] && return
+    read -erp "输入要解封的 IP (留空取消): " target_ip; [ -z "$target_ip" ] && return
     if ! validate_ip_or_cidr "$target_ip"; then
         printf '%b IP/CIDR 无效，或缺少 Python 3 地址校验器。\n' "$ERROR" >&2
-        read -rp "按回车键继续..."; return 1
+        read -erp "按回车键继续..."; return 1
     fi
     if $SUDO fail2ban-client set "$TARGET_JAIL" unbanip "$target_ip"; then
         echo -e "${INFO} ${GREEN}解封成功: $target_ip${RESET}"
     else
         echo -e "${ERROR} 操作失败。"
     fi
-    read -rp "按回车键继续..."
+    read -erp "按回车键继续..."
 }
 
 get_f2b_effective_ignoreip() {
@@ -1594,7 +1594,7 @@ add_f2b_whitelist() {
     current_list="$(get_f2b_effective_ignoreip)" || return 1
     echo -e "当前有效白名单: ${YELLOW}${current_list:-无}${RESET}"
     local current_ip; current_ip=$(echo "$SSH_CLIENT" | awk '{print $1}')
-    read -rp "输入要放行的 IP (回车默认当前连接 IP: ${current_ip:-无}): " input_ip
+    read -erp "输入要放行的 IP (回车默认当前连接 IP: ${current_ip:-无}): " input_ip
     [ -z "$input_ip" ] && input_ip="$current_ip"
     [ -z "$input_ip" ] && echo -e "${ERROR} 无法获取 IP。" && return
     if ! validate_ip_or_cidr "$input_ip"; then
@@ -1607,7 +1607,7 @@ add_f2b_whitelist() {
         else set_f2b_conf "ignoreip" "$current_list $input_ip"; fi
         restart_f2b
     fi
-    read -rp "按回车键继续..."
+    read -erp "按回车键继续..."
 }
 
 view_f2b_logs() {
@@ -1633,10 +1633,11 @@ view_f2b_logs() {
         fi
     fi
     echo -e "${CYAN}============================================================${RESET}"
-    read -rp "按回车键返回..."
+    read -erp "按回车键返回..."
 }
 
 menu_f2b_exponential() {
+    local sc=''
     while true; do
         clear
         local inc fac max
@@ -1655,7 +1656,7 @@ menu_f2b_exponential() {
         echo -e "${CYAN}------------------------------------------------------------${RESET}"
         echo -e "  ${GREEN}0.${RESET} 返回上级"
         echo -e "${CYAN}============================================================${RESET}"
-        read -rp "请选择 [0-3]: " sc
+        read_menu_line "请选择 [0-3]: " sc
         case "$sc" in
             1) [ "$inc" == "true" ] && ns="false" || ns="true"; set_f2b_conf "bantime.increment" "$ns"; restart_f2b ;;
             2) change_f2b_param "增长系数 (倍数)" "bantime.factor" "factor" ;;
@@ -1667,7 +1668,8 @@ menu_f2b_exponential() {
 }
 
 manage_fail2ban_menu() {
-    if ! check_f2b_install; then read -rp "按回车键返回主菜单..."; return; fi
+    local choice=''
+    if ! check_f2b_install; then read -erp "按回车键返回主菜单..."; return; fi
     while true; do
         clear
         VAL_MAX=$(get_f2b_conf "maxretry"); VAL_BAN=$(get_f2b_conf "bantime"); VAL_FIND=$(get_f2b_conf "findtime")
@@ -1689,7 +1691,7 @@ manage_fail2ban_menu() {
         echo -e "  ${GREEN}9.${RESET} 卸载 Fail2Ban"
         echo -e "  ${GREEN}0.${RESET} 返回主菜单"
         echo -e "${CYAN}============================================================${RESET}"
-        read -rp "请选择 [0-9]: " choice
+        read_menu_line "请选择 [0-9]: " choice
         case "$choice" in
             1) change_f2b_param "最大重试次数" "maxretry" "int" ;;
             2) change_f2b_param "初始封禁时长" "bantime" "time" ;;
@@ -1746,7 +1748,7 @@ show_status() {
 
 generate_vps_keypair() {
     echo -e "${WARN} 推荐在本人电脑或硬件密钥上生成私钥，VPS 只保存公钥。"
-    read -rp "仍要在 VPS 上生成临时 ED25519 私钥吗？(y/N): " generate_confirm || return 1
+    read -erp "仍要在 VPS 上生成临时 ED25519 私钥吗？(y/N): " generate_confirm || return 1
     [[ "$generate_confirm" =~ ^[Yy]$ ]] || return 1
     local dir pub_content rm_confirm
     dir="$(generated_key_files create)" || return 1
@@ -1765,7 +1767,7 @@ generate_vps_keypair() {
     fi
     printf '%b 密钥已生成。请使用 SFTP 下载 %s/PrivateKey。\n' "$INFO" "$dir"
     printf '公钥（可以公开）：\n%s\n' "$pub_content"
-    read -rp "已下载私钥并保存口令，立即删除 VPS 暂存文件吗？(y/N): " rm_confirm || rm_confirm=n
+    read -erp "已下载私钥并保存口令，立即删除 VPS 暂存文件吗？(y/N): " rm_confirm || rm_confirm=n
     if [[ "$rm_confirm" =~ ^[Yy]$ ]]; then
         generated_key_files delete "$dir" || { printf '%b 删除未完成，请检查 %s。\n' "$ERROR" "$dir" >&2; return 1; }
         printf '%b 已删除当前文件；备份或快照中的副本需另行管理。\n' "$INFO"
@@ -1777,7 +1779,7 @@ generate_vps_keypair() {
 toggle_pubkey_login() {
     local current
     if ! current="$(require_sshd_val "PubkeyAuthentication" "yes")"; then
-        read -rp "按回车键继续..."; return 1
+        read -erp "按回车键继续..."; return 1
     fi
 
     if [[ "${current,,}" == "no" ]]; then
@@ -1786,7 +1788,7 @@ toggle_pubkey_login() {
         if [ "$key_count" -eq 0 ]; then
             echo -e "${YELLOW}[提示] 当前 authorized_keys 中还没有公钥，启用后仍需先添加公钥才能通过密钥登录。${RESET}"
         fi
-        read -rp "是否要启用密钥登录？(y/N): " confirm
+        read -erp "是否要启用密钥登录？(y/N): " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
             if set_sshd_config "PubkeyAuthentication" "yes" && restart_sshd; then
                 echo -e "${INFO} ${GREEN}密钥登录已成功启用。${RESET}"
@@ -1800,18 +1802,19 @@ toggle_pubkey_login() {
 
         if ! confirm_password_fallback "禁用密钥登录"; then
             printf '%b 未确认可用的密码备用连接，已保留密钥登录。\n' "$ERROR" >&2
-            read -rp "按回车键继续..."; return 1
+            read -erp "按回车键继续..."; return 1
         fi
 
         if set_sshd_config "PubkeyAuthentication" "no" && restart_sshd; then
             echo -e "${INFO} ${GREEN}密钥登录已禁用，现在只能通过密码登录。${RESET}"
         fi
     fi
-    read -rp "按回车键继续..."
+    read -erp "按回车键继续..."
 }
 
 # ============ 密钥配置菜单 ============
 install_key_menu() {
+    local key_opt=''
     while true; do
         clear
         init_ssh_dir || return 1
@@ -1847,7 +1850,7 @@ install_key_menu() {
         echo -e "  ${GREEN}5.${RESET} 密钥登录开关 ${pubkey_label}"
         echo -e "  ${GREEN}0.${RESET} 返回主菜单"
         echo -e "${CYAN}============================================================${RESET}"
-        read -rp "请输入选项 [0-5]: " key_opt || return
+        read_menu_line "请输入选项 [0-5]: " key_opt || return
 
         local test_hint=""
         local do_restart=0
@@ -1856,15 +1859,15 @@ install_key_menu() {
             1)
                 echo -e "\n${YELLOW}${BOLD}[使用前提]${RESET}"
                 echo -e "需先将本地公钥上传至 GitHub: ${CYAN}https://github.com/settings/keys${RESET}\n"
-                read -rp "请输入您的 GitHub 用户名: " gh_user
+                read -erp "请输入您的 GitHub 用户名: " gh_user
                 if [ -z "$gh_user" ]; then
                     echo -e "${ERROR} 输入不能为空！"
-                    read -rp "按回车键继续..."
+                    read -erp "按回车键继续..."
                     continue
                 fi
                 if [[ ! "$gh_user" =~ ^[A-Za-z0-9-]+$ ]]; then
                     echo -e "${ERROR} GitHub 用户名格式不正确。"
-                    read -rp "按回车键继续..."
+                    read -erp "按回车键继续..."
                     continue
                 fi
                 echo -e "${INFO} 正在从 GitHub 拉取公钥..."
@@ -1872,20 +1875,20 @@ install_key_menu() {
                 if ! pub_key="$(fetch_public_keys "https://github.com/${gh_user}.keys")"; then
                     echo -e "\n${ERROR} 获取公钥失败！可能是用户名不正确，或该 GitHub 账号未配置公钥。"
                     echo -e "${CYAN}------------------------------------------------------------${RESET}"
-                    read -rp "是否要在 VPS 上全新生成密钥 (选项 2)？(y/N): " switch_opt2
+                    read -erp "是否要在 VPS 上全新生成密钥 (选项 2)？(y/N): " switch_opt2
                     if [[ "$switch_opt2" =~ ^[Yy]$ ]]; then
                         if generate_vps_keypair; then
                             test_hint="请将已保存的私钥导入本地 SSH 客户端，新建终端测试连接。"
                             do_restart=1
                         fi
                     else
-                        read -rp "按回车键继续..."
+                        read -erp "按回车键继续..."
                         continue
                     fi
                 else
                     if ! confirm_remote_key_fingerprints "$pub_key" "GitHub 用户 ${gh_user}"; then
                         printf '%b 未完成可信指纹核对，已取消导入。\n' "$ERROR" >&2
-                        read -rp "按回车键继续..."
+                        read -erp "按回车键继续..."
                         continue
                     fi
                     if append_key_with_meta "$pub_key" "GitHub: ${gh_user}"; then
@@ -1901,26 +1904,26 @@ install_key_menu() {
                 fi
                 ;;
             3)
-                read -rp "请输入公钥 URL: " key_url
+                read -erp "请输入公钥 URL: " key_url
                 if [ -z "$key_url" ]; then
                     echo -e "${ERROR} URL 不能为空！"
-                    read -rp "按回车键继续..."
+                    read -erp "按回车键继续..."
                     continue
                 fi
                 if [[ ! "$key_url" =~ ^https:// ]]; then
                     echo -e "${ERROR} 为防止读取本地文件，只允许 https:// 公钥地址。"
-                    read -rp "按回车键继续..."
+                    read -erp "按回车键继续..."
                     continue
                 fi
                 local pub_key
                 if ! pub_key="$(fetch_public_keys "$key_url")"; then
                     echo -e "${ERROR} 从 URL 获取公钥失败！"
-                    read -rp "按回车键继续..."
+                    read -erp "按回车键继续..."
                     continue
                 fi
                 if ! confirm_remote_key_fingerprints "$pub_key" '自定义 URL'; then
                     printf '%b 未完成可信指纹核对，已取消导入。\n' "$ERROR" >&2
-                    read -rp "按回车键继续..."
+                    read -erp "按回车键继续..."
                     continue
                 fi
                 if append_key_with_meta "$pub_key" "自定义URL"; then
@@ -1951,7 +1954,7 @@ install_key_menu() {
                 echo -e "测试成功后，再返回主菜单【禁用密码登录】！"
                 echo -e "${CYAN}------------------------------------------------------------${RESET}"
             fi
-            read -rp "按回车键返回密钥管理子菜单..."
+            read -erp "按回车键返回密钥管理子菜单..."
         fi
     done
 }
@@ -1986,7 +1989,7 @@ manage_keys_menu() {
         if [ ${#key_contents[@]} -eq 0 ]; then
             echo -e "\n${WARN} 当前 ${auth_file} 中没有找到任何有效公钥！"
             echo -e "${CYAN}============================================================${RESET}"
-            read -rp "按回车键返回..."
+            read -erp "按回车键返回..."
             return
         fi
 
@@ -2030,19 +2033,19 @@ manage_keys_menu() {
             local valid_key_count confirm_all
             if ! valid_key_count="$(count_authorized_keys)"; then
                 printf '%b 无法可靠统计有效公钥，已取消清空。\n' "$ERROR" >&2
-                read -rp "按回车继续..." || return; continue
+                read -erp "按回车继续..." || return; continue
             fi
             if [ "$valid_key_count" -gt 0 ]; then
                 if confirm_password_fallback "清空全部有效公钥"; then confirm_all=y
                 else
                     printf '%b 未确认可用的密码备用连接，已取消清空。\n' "$ERROR" >&2
-                    read -rp "按回车继续..." || return; continue
+                    read -erp "按回车继续..." || return; continue
                 fi
             else
-                read -rp "文件中没有可解析的有效公钥；确认清空其余记录吗？(y/N): " confirm_all
+                read -erp "文件中没有可解析的有效公钥；确认清空其余记录吗？(y/N): " confirm_all
             fi
             if [[ "$confirm_all" =~ ^[Yy]$ ]]; then
-                remove_authorized_key all "$key_snapshot" || { read -rp "删除失败，按回车刷新..."; continue; }
+                remove_authorized_key all "$key_snapshot" || { read -erp "删除失败，按回车刷新..."; continue; }
                 echo -e "${INFO} 已清空所有公钥，原文件已备份。"
                 sleep 1
                 continue
@@ -2086,19 +2089,19 @@ manage_keys_menu() {
             local valid_key_count confirm_del
             if ! valid_key_count="$(count_authorized_keys)"; then
                 printf '%b 无法可靠统计有效公钥，已取消删除。\n' "$ERROR" >&2
-                read -rp "按回车继续..." || return; continue
+                read -erp "按回车继续..." || return; continue
             fi
             if [ "$valid_key_count" -gt 0 ] && [ "$selected_valid_count" -ge "$valid_key_count" ]; then
                 if confirm_password_fallback "删除选中的全部有效公钥"; then confirm_del=y
                 else
                     printf '%b 未确认可用的密码备用连接，已取消删除。\n' "$ERROR" >&2
-                    read -rp "按回车继续..." || return; continue
+                    read -erp "按回车继续..." || return; continue
                 fi
             else
-                read -rp "确认删除序号 [${selected_label}] 的公钥吗？(y/N): " confirm_del
+                read -erp "确认删除序号 [${selected_label}] 的公钥吗？(y/N): " confirm_del
             fi
             if [[ "$confirm_del" =~ ^[Yy]$ ]]; then
-                remove_authorized_key "$target_line_numbers" "$key_snapshot" || { read -rp "删除失败，按回车刷新..."; continue; }
+                remove_authorized_key "$target_line_numbers" "$key_snapshot" || { read -erp "删除失败，按回车刷新..."; continue; }
                 echo -e "${INFO} ${GREEN}序号 [${selected_label}] 的公钥已成功删除！${RESET}"
                 sleep 1
                 continue
@@ -2140,7 +2143,7 @@ confirm_password_fallback() {
     password_login_ready "" || return 1
     printf '%b 请保留当前会话，先用目标用户 %s 和密码建立一条新的 SSH 连接。\n' "$WARN" "$TARGET_USER"
     local confirm
-    read -rp "已成功测试密码备用连接，继续${purpose}吗？(y/N): " confirm || return 1
+    read -erp "已成功测试密码备用连接，继续${purpose}吗？(y/N): " confirm || return 1
     [[ "$confirm" =~ ^[Yy]$ ]]
 }
 
@@ -2201,7 +2204,7 @@ warn_global_password_disable() {
     fi
     if [ "$mode" = interactive ] && [ -n "$others" ]; then
         local confirm
-        read -rp "确认对整机禁用密码登录吗？(y/N): " confirm || return 1
+        read -erp "确认对整机禁用密码登录吗？(y/N): " confirm || return 1
         [[ "$confirm" =~ ^[Yy]$ ]] || return 1
     fi
     return 0
@@ -2214,15 +2217,15 @@ toggle_password_login() {
         return 1
     fi
     if [ "$current" = no ]; then
-        read -rp "启用密码登录吗？(y/N): " confirm || return 1
+        read -erp "启用密码登录吗？(y/N): " confirm || return 1
         [[ "$confirm" =~ ^[Yy]$ ]] || return 0
         set_sshd_config PasswordAuthentication yes && restart_sshd || return 1
-        read -rp "为目标用户设置新密码吗？(y/N): " pwd_confirm || return 0
+        read -erp "为目标用户设置新密码吗？(y/N): " pwd_confirm || return 0
         [[ "$pwd_confirm" =~ ^[Yy]$ ]] && $SUDO passwd "$TARGET_USER"
     elif [ "$current" = yes ]; then
         publickey_login_ready "" || { printf '%b 未通过防误锁检查，保留密码登录。\n' "$ERROR" >&2; return 1; }
         printf '%b 请保留当前会话，并用目标用户和本地私钥建立一条新的 SSH 连接。\n' "$WARN"
-        read -rp "已成功建立新连接，现在禁用密码登录吗？(y/N): " confirm || return 1
+        read -erp "已成功建立新连接，现在禁用密码登录吗？(y/N): " confirm || return 1
         [[ "$confirm" =~ ^[Yy]$ ]] || return 0
         warn_global_password_disable interactive || { echo -e "${INFO} 已取消操作。"; return 0; }
         set_sshd_config PasswordAuthentication no &&
@@ -2352,7 +2355,7 @@ warn_or_abort_unmanaged_fw() {
         return 1
     fi
     local confirm
-    read -rp "确认你将自行开放新端口并继续？(y/N): " confirm || return 1
+    read -erp "确认你将自行开放新端口并继续？(y/N): " confirm || return 1
     [[ "$confirm" =~ ^[Yy]$ ]] || { echo -e "${INFO} 已取消。"; return 1; }
     return 0
 }
@@ -2509,51 +2512,51 @@ ssh_socket_activation_unit() {
 }
 
 change_ssh_port() {
-    local current_port new_port
+    local current_port new_port=''
     if ! current_port="$(require_sshd_val "Port" "22")"; then
-        read -rp "按回车键返回主菜单..."
+        read -erp "按回车键返回主菜单..."
         return 1
     fi
     echo -e "\n当前 SSH 端口为: ${CYAN}${current_port}${RESET}"
     if [ -n "$SSH_CLIENT" ] || [ -n "$SSH_TTY" ]; then
         echo -e "${YELLOW}${BOLD}[提示] 检测到您正在使用 SSH 远程会话，修改端口后请勿关闭当前窗口，请先新建终端验证！${RESET}"
     fi
-    read -rp "请输入新的 SSH 端口 (22 或 1024-65535): " new_port
+    read_menu_line "请输入新的 SSH 端口 (22 或 1024-65535): " new_port
 
     if ! validate_ssh_port "$new_port"; then
         echo -e "${ERROR} 端口格式不正确！"
-        read -rp "按回车键返回主菜单..."
+        read -erp "按回车键返回主菜单..."
         return
     fi
     # 已仅监听该端口则无需修改
     if [ "$current_port" = "$new_port" ]; then
         echo -e "${INFO} SSH 已仅使用端口 ${new_port}，无需修改。"
-        read -rp "按回车键返回主菜单..."
+        read -erp "按回车键返回主菜单..."
         return
     fi
     local socket_unit=""
     if socket_unit="$(ssh_socket_activation_unit)"; then
         printf '%b %s 正在活动或已启用；请先从控制台迁移 socket 的 ListenStream。\n' "$ERROR" "$socket_unit" >&2
-        read -rp "按回车键返回主菜单..."
+        read -erp "按回车键返回主菜单..."
         return 1
     fi
     # 若当前 sshd 已包含目标端口，不把它当成“被其他服务占用”
     if ! port_available_for_sshd "$current_port" "$new_port"; then
-        read -rp "按回车键返回主菜单..."
+        read -erp "按回车键返回主菜单..."
         return 1
     fi
     if ! f2b_port_sync_preflight; then
-        read -rp "按回车键返回主菜单..."
+        read -erp "按回车键返回主菜单..."
         return 1
     fi
 
     warn_or_abort_unmanaged_fw interactive || {
-        read -rp "按回车键返回主菜单..."
+        read -erp "按回车键返回主菜单..."
         return 1
     }
 
     if ! prepare_port_access "$new_port"; then
-        read -rp "按回车键返回主菜单..."
+        read -erp "按回车键返回主菜单..."
         return 1
     fi
 
@@ -2561,7 +2564,7 @@ change_ssh_port() {
         echo -e "${ERROR} 写入 SSH 配置失败，原配置未改变。"
         rollback_sshd_transaction
         rollback_port_fw_changes
-        read -rp "按回车键返回主菜单..."
+        read -erp "按回车键返回主菜单..."
         return
     fi
 
@@ -2584,7 +2587,7 @@ change_ssh_port() {
         rollback_port_fw_changes
     fi
 
-    read -rp "按回车键返回主菜单..."
+    read -erp "按回车键返回主菜单..."
 }
 
 # 供自动化测试安全加载函数；正常执行不受影响。
@@ -2831,7 +2834,8 @@ while true; do
     echo -e " ${GREEN}4.${RESET} SSH 端口修改"
     echo -e " ${GREEN}0.${RESET} 退出脚本"
     echo -e "${CYAN}============================================================${RESET}"
-    read -rp "请输入选项 [0-4]: " choice || exit 0
+    choice=''
+    read_menu_line "请输入选项 [0-4]: " choice || exit 0
 
     case "$choice" in
         1) install_key_menu ;;
